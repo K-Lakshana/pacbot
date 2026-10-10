@@ -18,11 +18,12 @@ What you send:
 
 Run:
     ./task_2a_launch                 # terminal 1
-    python3 task_2a_solution.py      # terminal 2
+    python3 task_2a_boilerplate.py   # terminal 2
 """
 import heapq
 import json
 import math
+from collections import deque
 
 import paho.mqtt.client as mqtt
 
@@ -160,9 +161,10 @@ def clamp(x, lo, hi):
 def wheels(v, omega):
     """(left, right) wheel speeds in rad/s for a forward speed v (m/s) and
     a turn rate omega (rad/s, positive = counter-clockwise / left)."""
-    left = (v - omega * TRACK / 2) / WHEEL_R
-    right = (v + omega * TRACK / 2) / WHEEL_R
-    return clamp(left, -WHEEL_MAX, WHEEL_MAX), clamp(right, -WHEEL_MAX, WHEEL_MAX)
+    w = clamp(omega * TRACK / 2 / WHEEL_R, -WHEEL_MAX, WHEEL_MAX)   # differential part
+    room = WHEEL_MAX - abs(w)                                       # what is left for forward speed
+    f = clamp(v / WHEEL_R, -room, room)                             # common (forward) part
+    return f - w, f + w
 
 
 # ---------------------------------------------------- extra geometry helpers
@@ -257,6 +259,44 @@ def search(start, heading, goal, allow_exit=False):
     raise ValueError(f"no path from {start} to {goal}")
 
 
+def bfs(start, goal, allow_exit=False):
+    """Plain breadth-first search over the cell graph: fewest cell moves from
+    `start` to `goal`. Returns the list of cells, or raises ValueError if the
+    goal is unreachable. (`search` below is the same idea with a turn penalty;
+    with TURN_COST = 0 the two give routes of equal length.)"""
+    if not (inside(*start) and (inside(*goal) or allow_exit)):
+        raise ValueError(f"bad start/goal {start} -> {goal}")
+    parent = {start: None}
+    queue = deque([start])
+    while queue:
+        cell = queue.popleft()
+        if cell == goal:
+            path = []
+            while cell is not None:
+                path.append(cell)
+                cell = parent[cell]
+            return path[::-1]
+        for _, nxt in successors(cell, allow_exit):
+            if nxt not in parent:
+                parent[nxt] = cell
+                queue.append(nxt)
+    raise ValueError(f"no path from {start} to {goal}")
+
+
+def validate_cells(cells):
+    """Check every step of a cell route against the wall table: the cells must
+    be adjacent and the side we leave through must have no wall. The only step
+    allowed to leave the maze is the exit from (14, 14)."""
+    for a, b in zip(cells, cells[1:]):
+        if (b[0] - a[0], b[1] - a[1]) not in STEP:
+            raise ValueError(f"{a} -> {b} are not neighbours")
+        d = STEP.index((b[0] - a[0], b[1] - a[1]))
+        if WALLS[a[0], a[1], d]:
+            raise ValueError(f"wall between {a} and {b}")
+        if not inside(*b) and (a[0], a[1], d) != EXIT:
+            raise ValueError(f"{a} -> {b} leaves the maze somewhere other than the exit")
+
+
 def cells_to_actions(cells, heading):
     """Cell list -> [("turn", d), ("run", n), ...] with straight moves merged."""
     actions = []
@@ -272,6 +312,19 @@ def cells_to_actions(cells, heading):
     return actions
 
 
+def plan_cells(start, heading, pellet):
+    """Cell-by-cell route: spawn -> pellet -> out through the exit.
+    Every step is validated against the maze walls before it is returned."""
+    if not (inside(*start) and inside(*pellet)):
+        raise ValueError(f"spawn {start} or pellet {pellet} is outside the maze")
+    outside = (EXIT[0] + STEP[EXIT[2]][0], EXIT[1] + STEP[EXIT[2]][1])   # (15, 14)
+    leg1, h = search(start, heading, pellet)                  # spawn  -> pellet
+    leg2, _ = search(pellet, h, outside, allow_exit=True)     # pellet -> through the exit
+    cells = leg1 + leg2[1:]                                   # pellet cell not duplicated
+    validate_cells(cells)
+    return cells
+
+
 def plan_route(start, heading, pellet):
     """Plan the route: from `start` facing `heading`, through `pellet`, out
     of the exit.
@@ -282,16 +335,13 @@ def plan_route(start, heading, pellet):
     straight on, "turn d" pivots to face direction d. The last run should
     carry the robot out through the exit.
     """
-    outside = (EXIT[0] + STEP[EXIT[2]][0], EXIT[1] + STEP[EXIT[2]][1])   # (15, 14)
-    leg1, h = search(start, heading, pellet)      # spawn  -> pellet
-    leg2, _ = search(pellet, h, outside, allow_exit=True)   # pellet -> through the exit
-    return cells_to_actions(leg1 + leg2[1:], heading)
+    return cells_to_actions(plan_cells(start, heading, pellet), heading)
 
 
 # ================================================================ solver
 
 # --- driving parameters (tune these) ---
-V_MAX = 1         # m/s, top straight-line speed
+V_MAX = 0.45      # m/s, top straight-line speed (30 rad/s wheel limit = 0.51 m/s; keep headroom to steer)
 V_MIN = 0.05          # m/s, creep speed so we never stall short of the target
 ACC = 1.0             # m/s^2, speed ramp-up
 KV = 3.0              # 1/s, speed = KV * distance_left (slows down on approach)
@@ -312,6 +362,15 @@ SIDE_RANGE = 0.20     # m, use the side sensors only below this reading
 SIDE_ZONE = 0.07      # m, side sensors only used this close to a cell centre
 GATE = 0.05           # m, ignore corrections bigger than this (bad reading)
 BLEND = 0.20          # fraction of the measured error applied per frame
+ALIGN_WIDE = 0.30     # rad, ToF position fixes are still used up to this heading error
+EDGE_STEP = 0.05      # m, a side reading that changes this much in one frame is a wall edge
+EDGE_GATE = 0.10      # m, ignore an edge fix that would move the pose more than this
+EDGE_ASSOC = 0.10     # m, an edge is matched to a cell boundary at most this far from where we think we are
+SLOPE_WIN = 0.06      # m, travel needed to measure a side-wall slope
+SLOPE_GAIN = 0.35     # fraction of the slope-derived heading error applied per window
+SLOPE_JUMP = 0.012    # m, a side reading that jumps more than this per frame is not a flat wall
+CAL_FRAMES = 30       # stationary frames at the start used to measure the gyro bias
+STUCK_TIME = 0.3      # s, no progress for this long while commanding motion -> stop and report
 
 
 class Solver:
@@ -337,6 +396,15 @@ class Solver:
         self.v_cmd = 0.0
         self.settled = 0
         self.finished_logged = False
+        self.error = None       # set (and the robot stopped) if something goes wrong
+        self.cal_n = 0          # gyro-bias calibration frames collected
+        self.cal_sum = 0.0
+        self.gyro_bias = 0.0
+        self.travel = 0.0       # axle distance rolled in the latest frame
+        self.prev_side = {}     # last frame's fl / fr readings (wall-edge detection)
+        self.anchors = {}       # per side sensor: (path length, reading) for the slope estimate
+        self.path_len = 0.0     # running path length used by the slope estimate
+        self.stuck_t = 0.0
         # Controllers.
         self.turn_pid = PID(kp=8.0, ki=0.5, kd=0.3, i_max=0.2, i_zone=0.1)
         self.head_pid = PID(kp=5.0, ki=0.0, kd=0.3)
@@ -377,6 +445,8 @@ class Solver:
         mid = self.theta + 0.5 * turn_rate * dt          # heading half-way through the frame
         self.theta += turn_rate * dt
         dist = 0.5 * (d_left + d_right)                  # axle travel this frame
+        self.travel = dist
+        self.path_len += abs(dist)
         self.x += dist * math.cos(mid)
         self.y += dist * math.sin(mid)
 
@@ -385,8 +455,11 @@ class Solver:
         d = the direction (0-3) of the straight run we are on."""
         dth = d * math.pi / 2
         a = wrap(self.theta - dth)                       # heading error vs the corridor
-        if abs(a) > ALIGN_MAX:
+        self.side_slope_heading(s, d, dth)               # may refine theta
+        a = wrap(self.theta - dth)
+        if abs(a) > ALIGN_WIDE:
             return
+        self.edge_correct(s, d, a)
         dx, dy = STEP[d][1], -STEP[d][0]                 # unit vector along the run
         nx, ny = -dy, dx                                 # unit vector to the left
 
@@ -427,6 +500,67 @@ class Solver:
                 self.x += BLEND * delta * nx
                 self.y += BLEND * delta * ny
 
+    def edge_correct(self, s, d, a):
+        """Along-track position fix from side-wall edges. Where a side wall
+        starts or ends it does so at a known cell boundary (from WALLS), so the
+        frame in which a side ToF reading jumps tells us where we are along the
+        run. Only used when the jump matches what the maze says should happen."""
+        dx, dy = STEP[d][1], -STEP[d][0]
+        reach = (AXLE_BACK + _SENS["fl"][0][0]) * math.cos(a)        # axle -> side sensors, along the run
+        sx, sy = self.x + reach * dx, self.y + reach * dy
+        row, col = nearest_cell(sx, sy)
+        prev, self.prev_side = self.prev_side, {"fl": s["fl"], "fr": s["fr"]}
+        if not inside(row, col):
+            return
+        cx, cy = cell_centre((row, col))
+        u = (sx - cx) * dx + (sy - cy) * dy                          # sensor position within this cell
+        for name, side in (("fl", (d + 1) % 4), ("fr", (d + 3) % 4)):
+            if name not in prev:
+                continue
+            was, now = prev[name] < SIDE_RANGE, s[name] < SIDE_RANGE
+            if was == now or abs(prev[name] - s[name]) < EDGE_STEP:
+                continue
+            best = None
+            for sgn in (1, -1):                                      # boundary ahead / behind this cell
+                behind = (row, col) if sgn == 1 else (row - STEP[d][0], col - STEP[d][1])
+                ahead = (row + STEP[d][0], col + STEP[d][1]) if sgn == 1 else (row, col)
+                if not (inside(*behind) and inside(*ahead)):
+                    continue
+                if WALLS[behind[0], behind[1], side] != was or WALLS[ahead[0], ahead[1], side] != now:
+                    continue                                         # the maze does not predict this edge here
+                if abs(u - sgn * PITCH / 2) < EDGE_ASSOC and (best is None or abs(u - sgn * PITCH / 2) < best[0]):
+                    best = (abs(u - sgn * PITCH / 2), sgn)
+            if best is None:
+                continue
+            sgn = best[1]
+            # the wall slab ends WALL_HALF beyond the boundary when leaving it, starts WALL_HALF before it when entering
+            u_true = sgn * PITCH / 2 + (WALL_HALF if was else -WALL_HALF) + 0.5 * abs(self.travel)
+            delta = u_true - u
+            if abs(delta) < EDGE_GATE:
+                self.x += delta * dx
+                self.y += delta * dy
+                return                                               # one fix per frame is plenty
+
+    def side_slope_heading(self, s, d, dth):
+        """Heading from a flat side wall: as we roll forward a distance ds the
+        reading of a sideways ToF changes by -tan(a)*ds (left) / +tan(a)*ds
+        (right), where a is our heading error relative to the wall. This
+        removes gyro drift without needing the heading to be right already."""
+        for name, sign in (("fl", -1.0), ("fr", 1.0)):
+            v = s[name]
+            anchor = self.anchors.get(name)
+            if v >= SIDE_RANGE or anchor is None or abs(v - anchor[2]) > SLOPE_JUMP:
+                self.anchors[name] = (self.path_len, v, v)   # (start length, start reading, last reading)
+                continue
+            ds = self.path_len - anchor[0]
+            self.anchors[name] = (anchor[0], anchor[1], v)
+            if ds < SLOPE_WIN:
+                continue
+            a_est = sign * math.atan((v - anchor[1]) / ds)
+            if abs(a_est) < 0.25:                        # plausible; otherwise ignore the window
+                self.theta += SLOPE_GAIN * wrap(dth + a_est - self.theta)
+            self.anchors[name] = (self.path_len, v, v)
+
     # ---------------------------------------------------------- actions
     def start_action(self):
         kind, arg = self.actions[self.i]
@@ -434,6 +568,9 @@ class Solver:
         self.head_pid.reset()
         self.settled = 0
         self.v_cmd = 0.0
+        self.stuck_t = 0.0
+        self.anchors = {}
+        self.prev_side = {}
         if kind == "turn":
             self.heading = arg
         else:
@@ -504,10 +641,26 @@ class Solver:
         self.prev_ticks = ticks
         turn_rate = s["gyro"][2]
 
-        if self.done or self.spawn is None or self.pellet is None:
+        if self.done or self.error or self.spawn is None or self.pellet is None:
             return 0.0, 0.0
+        # The robot starts at rest: average the gyro for a moment to remove its bias.
+        if self.cal_n < CAL_FRAMES:
+            self.cal_sum += turn_rate
+            self.cal_n += 1
+            if self.cal_n == CAL_FRAMES:
+                self.gyro_bias = self.cal_sum / CAL_FRAMES
+                self.log(f"gyro bias {self.gyro_bias:+.4f} rad/s")
+            return 0.0, 0.0
+        turn_rate -= self.gyro_bias
         if self.actions is None:
-            self.actions = plan_route(self.spawn[1], self.spawn[0], self.pellet)
+            try:
+                cells = plan_cells(self.spawn[1], self.spawn[0], self.pellet)
+            except ValueError as e:
+                self.error = f"planning failed: {e}"
+                self.log("STOPPED: " + self.error)
+                return 0.0, 0.0
+            self.actions = cells_to_actions(cells, self.spawn[0])
+            self.log("route: " + " ".join(f"({r},{c})" for r, c in cells))
             self.log(f"plan: {self.actions}")
             self.init_pose()
 
@@ -524,8 +677,24 @@ class Solver:
             self.start_action()
         kind = self.actions[self.i][0]
         if kind == "turn":
-            return self.do_turn(turn_rate, s["dt"])
-        return self.do_run(s, turn_rate, s["dt"])
+            cmd = self.do_turn(turn_rate, s["dt"])
+        else:
+            cmd = self.do_run(s, turn_rate, s["dt"])
+        return self.check_progress(cmd, d_left, d_right, turn_rate, s["dt"], kind)
+
+    def check_progress(self, cmd, d_left, d_right, turn_rate, dt, kind):
+        """Stop and report instead of pushing into a wall: if we are commanding
+        motion but the wheels / gyro show (almost) none for STUCK_TIME, give up."""
+        if kind == "run":
+            moving = abs(cmd[0] + cmd[1]) * 0.5 * WHEEL_R > 0.08 and abs(self.travel) < 0.02 * dt
+        else:
+            moving = abs(cmd[1] - cmd[0]) * WHEEL_R / TRACK > 0.5 and abs(turn_rate) < 0.05
+        self.stuck_t = self.stuck_t + dt if moving else 0.0
+        if self.stuck_t > STUCK_TIME:
+            self.error = f"no progress during action {self.i + 1} ({self.actions[self.i]}) near cell {self.cell}"
+            self.log("STOPPED: " + self.error)
+            return 0.0, 0.0
+        return cmd
 
 
 # ================================================================== main
