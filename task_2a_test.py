@@ -130,7 +130,7 @@ def neighbours(cell):
     for d in range(4):
         n = (row + STEP[d][0], col + STEP[d][1])
         if not WALLS[row, col, d] and inside(*n):
-            out.append((d, n))
+            out.append((n,d))
     return out
 
 
@@ -239,28 +239,8 @@ def generate_robot_actions(path_data):
     actions.pop()
     actions.append(last_action)
     return actions[1:]
-
-def get_reachable_moves(tuplerc):
-    r=tuplerc[0]
-    c=tuplerc[1]
-
-    moves = []
     
-    if not WALLS[(r, c, 0)]:
-        moves.append([(r, c+1), 0])
-        
-    if not WALLS[(r, c, 1)]:
-        moves.append([(r-1, c), 1])
-        
-    if not WALLS[(r, c, 2)]:
-        moves.append([(r , c-1), 2])
-        
-    if not WALLS[(r,c, 3)]:
-        moves.append([(r+1, c), 3])
-        
-    return moves
-
-
+    
 
 def pathplan(start, dest):
     f=ed(start, dest)
@@ -287,7 +267,7 @@ def pathplan(start, dest):
             return trace_back(closed_list)
             break
             
-        moves = get_reachable_moves(current_cell[0])
+        moves = neighbours(current_cell[0])
         
         for j in moves:
             for k in closed_list:
@@ -392,8 +372,7 @@ class Solver:
         #       (and the ToF readings, to correct it).
         # TODO: drive self.actions one by one, e.g. with wheels(v, omega).
      
-        return 0.0,0.0
-
+        return 0.0, 0.0
 
 # ================================================================== main
 
