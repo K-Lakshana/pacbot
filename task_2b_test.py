@@ -334,6 +334,20 @@ class Controller:
                         break
                 else:
                     for index, k in enumerate(open_list):
+                        new_dir = j[0]
+                        prev_dir = current_cell[5]
+
+                        turn_cost = 0
+
+                        if prev_dir is not None:
+                            diff = abs(new_dir - prev_dir)
+
+                            if diff == 2:          # U-turn
+                                turn_cost = 10
+
+                            elif diff == 1 or diff == 3:   # 90 degree turn
+                                turn_cost = 5
+                                
                         g = current_cell[3]+1
                         if k[0]==j[0]:
                             if g<k[3]:
