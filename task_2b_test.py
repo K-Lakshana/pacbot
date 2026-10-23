@@ -271,7 +271,7 @@ class Controller:
     
     
     
-    def ed(self, start, end):
+    def ed(self, start, end): #euclidean distance
         return (((end[0]-start[0])*(end[0]-start[0])+(end[1]-start[1])*(end[1]-start[1]))**(1/2))
 
         
@@ -300,13 +300,13 @@ class Controller:
         path.reverse()
         return path
 
-
-    def path_plan(self, start, dest):
+    # path planning using A* algorithm with turn cost included
+    def path_plan(self, start, dest, start_heading):
         f=self.ed(start, dest)
         g=0
         h=f
         parent_point=None
-        open_list=[(start, parent_point, f, g, h, None)]
+        open_list=[(start, parent_point, f, g, h, start_heading)]
         closed_list=[]
         current_cell=(start, parent_point, f, g, h, None)
     
@@ -326,8 +326,19 @@ class Controller:
                 return self.trace_back(closed_list)
                 break
             
-            moves = self.maze.neighbours(current_cell[0])
-        
+            all_moves = self.maze.neighbours(current_cell[0])
+            moves = []
+            
+            # in place u-turns are not possible. hence avoided
+            for move in all_moves:
+                new_dir = move[0]
+                prev_dir = current_cell[5]
+                if prev_dir is not None and (abs(new_dir-prev_dir)%4)==2:
+                    continue
+                else:
+                    moves.append(move)
+            
+            
             for j in moves:
                 for k in closed_list:
                     if k[0]==j[1]:
@@ -348,22 +359,87 @@ class Controller:
                             elif diff == 1 or diff == 3:   # 90 degree turn
                                 turn_cost = 5
                                 
-                        g = current_cell[3]+1
-                        if k[0]==j[0]:
+                        g = current_cell[3]+1+turn_cost
+                        if k[0]==j[1]:
                             if g<k[3]:
                                 f = g + k[4]
                                 parent = current_cell[0]
                                 open_list[index]=(k[0], parent, f, g, k[4], j[0])
                             break
                     else:
+                        new_dir = j[0]
+                        prev_dir = current_cell[5]
+
+                        turn_cost = 0
+                        if prev_dir is not None:
+                            diff = abs(new_dir - prev_dir)
+
+                            if diff == 2:
+                                turn_cost = 10
+                            elif diff in [1,3]:
+                                turn_cost = 5
+
                         h = self.ed(j[1], dest)
-                        g = current_cell[3]+1
+                        g = current_cell[3]+1 + turn_cost
                         f = g+h
                         parent = current_cell[0]
                         open_list.append((j[1], parent, f, g, h, j[0]))
-  
+                        
+    # build each possible path
+    # possible combination of paths are: 
+    #S to 0 to 1 to 2 to E
+    #S to 0 to 2 to 1 to E  
+    #S to 1 to 0 to 2 to E
+    #S to 1 to 2 to 0 to E
+    #S to 2 to 0 to 1 to E
+    #S to 2 to 1 to 0 to E
+    # of all these possible paths, we are finding the one with less number of moves as well as turns
     
+    def build_route(self, order):
 
+        p1 = self.path_plan(self.maze.spawn_cell, self.pellets[order[0]],0)                    # Spawn facing EAST
+        h1 = p1[-1][1]
+        p2 = self.path_plan(self.pellets[order[0]], self.pellets[order[1]],h1)
+        h2 = p2[-1][1]
+        p3 = self.path_plan(self.pellets[order[1]],self.pellets[order[2]],h2)
+        h3 = p3[-1][1]
+        p4 = self.path_plan(self.pellets[order[2]],self.maze.exit_cell,h3)  
+        route = (p1 +p2[1:] +p3[1:] +p4[1:])   
+
+        return route
+        
+    
+    
+    def path_cost(self,path):
+        cost = len(path)
+        turns = 0
+
+        for i in range(2, len(path)):
+            if path[i][1] != path[i-1][1]:
+                turns += 1
+
+        return cost + 5*turns
+        
+        
+    def convert_path_to_moves(self, path):
+        path[0][1] = 0
+        
+        moves = ["FORWARD"]
+        
+        for i in range(1, len(path)):
+            curr_heading = path[i][1]
+            prev_heading = path[i-1][1]
+            
+            if (curr_heading == prev_heading+1) or (curr_heading==0 and prev_heading==3):
+                moves.append("LEFT")
+            elif curr_heading == prev_heading-1 or curr_heading==3 and prev_heading==0:
+                moves.append("RIGHT")
+            elif (abs(curr_heading-prev_heading))%4 ==2:
+                moves.append("UTURN")
+            moves.append("FORWARD")
+        return moves
+        
+        
     def on_pellets(self, msg):
         """Called whenever the remaining-pellet list arrives or changes.
 
@@ -376,33 +452,24 @@ class Controller:
         # TODO (optional): plan here rather than in decide(). You are told the
         # pellets once, at the start, and the maze never changes - so the whole
         # route can be computed now, before the robot has moved.
-        self.path_S_to_0 = self.path_plan(self.maze.spawn_cell, self.pellets[0])
-        self.path_S_to_1 = self.path_plan(self.maze.spawn_cell, self.pellets[1])
-        self.path_S_to_2 = self.path_plan(self.maze.spawn_cell, self.pellets[2])
-        self.path_0_to_1 = self.path_plan(self.pellets[0], self.pellets[1])
-        self.path_0_to_2 = self.path_plan(self.pellets[0], self.pellets[2])
-        self.path_1_to_0 = self.path_plan(self.pellets[1], self.pellets[0])
-        self.path_1_to_2 = self.path_plan(self.pellets[1], self.pellets[2])
-        self.path_2_to_0 = self.path_plan(self.pellets[2], self.pellets[0])
-        self.path_2_to_1 = self.path_plan(self.pellets[2], self.pellets[1])
-        self.path_0_to_E = self.path_plan(self.pellets[0], self.maze.exit_cell)
-        self.path_1_to_E = self.path_plan(self.pellets[1], self.maze.exit_cell)
-        self.path_2_to_E = self.path_plan(self.pellets[2], self.maze.exit_cell)
         
-        self.path_1 = self.path_S_to_0 + self.path_0_to_1[1:] + self.path_1_to_2[1:] + self.path_2_to_E[1:]
-        self.path_2 = self.path_S_to_0 + self.path_0_to_2[1:] + self.path_2_to_1[1:] + self.path_1_to_E[1:]
-        self.path_3 = self.path_S_to_1 + self.path_1_to_0[1:] + self.path_0_to_2[1:] + self.path_2_to_E[1:]
-        self.path_4 = self.path_S_to_1 + self.path_1_to_2[1:] + self.path_2_to_0[1:] + self.path_0_to_E[1:]
-        self.path_5 = self.path_S_to_2 + self.path_2_to_0[1:] + self.path_0_to_1[1:] + self.path_1_to_E[1:]
-        self.path_6 = self.path_S_to_2 + self.path_2_to_1[1:] + self.path_1_to_0[1:] + self.path_0_to_E[1:]
-        self.paths = [self.path_1, self.path_2, self.path_3, self.path_4, self.path_5, self.path_6]
-        self.opt_path = self.paths[0]
-        for i in self.paths:
-            if len(i)<len(self.opt_path):
-                self.opt_path = i
-        print(self.opt_path)
+        # paths[] store all possible path combinations
+        # then the cost of each path present in paths is calculated and the one with minimum cost is opt_path
+        self.paths = []
+
+        self.orders = [(0,1,2), (0, 2, 1), (1, 0, 2), (1,2 , 0), (2, 0, 1), (2, 1, 0)]
+
+        for order in self.orders:
+
+            route = self.build_route(order)
+
+            self.paths.append(route)
+            
+        self.opt_path = min(self.paths, key=self.path_cost)
         
-        
+        print(self.opt_path, '\n')
+        self.moves=self.convert_path_to_moves(self.opt_path)
+        print(self.moves)
         
     #lakshana end   
     
@@ -422,12 +489,15 @@ class Controller:
         yaw_rate = s["gyro"][2]      # rad/s about z
         # Ticks are cumulative counts, so speed is a DIFFERENCE, not a
         # reading. 360 counts per wheel revolution.
+        
+
         tl, tr = s["ticks_l"], s["ticks_r"]
         if self.prev_ticks is None or s["dt"] <= 0:
             speed = 0.0
         else:
             dl, dr = tl - self.prev_ticks[0], tr - self.prev_ticks[1]
             speed = (WHEEL_RADIUS * ((dl + dr) / 2.0) * TICK_RAD) / s["dt"]
+            distance = 0.017 * ((dl + dr) / 2) * (2 * math.pi / 360)
         self.prev_ticks = (tl, tr)
 
         # Nothing to do until we know where the pellets are.
