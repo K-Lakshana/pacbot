@@ -264,13 +264,23 @@ class Controller:
         self.elapsed = 0.0
         self.ghost = None     # latest pacbot/ghost payload, or None
         self.prev_ticks = None  # (left, right) counts from the previous frame
-        
-        
+        self.state = "OBSERVE_GHOST"
+        self.ghost_path = []
+        self.ghost_loop_found = False
+        self.move_index = 0
+        self.distance_travelled = 0.0
+        self.angle_turned = 0.0
+        self.cell_length = 0.22
+        self.turn_angle_target = math.pi/2
+        self.kp = 50
+        self.ki = 0.02
+        self.kd = 0
+        self.integral=0
+        self.prev_error = 0 
+        self.route_planned = False
         
     #lakshana start 
-    
-    
-    
+        
     def ed(self, start, end): #euclidean distance
         return (((end[0]-start[0])*(end[0]-start[0])+(end[1]-start[1])*(end[1]-start[1]))**(1/2))
 
@@ -333,7 +343,7 @@ class Controller:
             for move in all_moves:
                 new_dir = move[0]
                 prev_dir = current_cell[5]
-                if prev_dir is not None and (abs(new_dir-prev_dir)%4)==2:
+                if prev_dir is not None and (abs(new_dir-prev_dir)%4)==2 and move[0] not in self.ghost_path:
                     continue
                 else:
                     moves.append(move)
@@ -455,6 +465,11 @@ class Controller:
         
         # paths[] store all possible path combinations
         # then the cost of each path present in paths is calculated and the one with minimum cost is opt_path
+        if self.route_planned:
+            return
+        
+        self.route_planned = True
+
         self.paths = []
 
         self.orders = [(0,1,2), (0, 2, 1), (1, 0, 2), (1,2 , 0), (2, 0, 1), (2, 1, 0)]
@@ -469,8 +484,9 @@ class Controller:
         
         print(self.opt_path, '\n')
         self.moves=self.convert_path_to_moves(self.opt_path)
+        self.moves.append("FORWARD")
         print(self.moves)
-        
+
     #lakshana end   
     
     
@@ -485,13 +501,14 @@ class Controller:
 
         left_dist = s["fl"]          # m to the wall on the left
         right_dist = s["fr"]         # m to the wall on the right
-        front_dist = min(s["sl"], s["sr"])   # m to the wall ahead
+        front_dist = max(s["sl"], s["sr"])   # m to the wall ahead
         yaw_rate = s["gyro"][2]      # rad/s about z
         # Ticks are cumulative counts, so speed is a DIFFERENCE, not a
         # reading. 360 counts per wheel revolution.
         
 
         tl, tr = s["ticks_l"], s["ticks_r"]
+        
         if self.prev_ticks is None or s["dt"] <= 0:
             speed = 0.0
         else:
@@ -520,13 +537,112 @@ class Controller:
         #      (left_dist - right_dist) so you do not scrape a wall.
         #
         # Unused so far - delete these lines once you use them.
-        _ = (left_dist, right_dist, front_dist, yaw_rate, speed)
+        
+        
+        if self.move_index >= len(self.moves):
+            return 0.0, 0.0
 
-        forward = 0.0
-        turn = 0.0
+        command = self.moves[self.move_index]
+
+
+
+        if self.state == "OBSERVE_GHOST":
+            if self.ghost is not None:
+                col = round(self.ghost["x"] / 0.22)
+                row = 14 - round(self.ghost["y"] / 0.22)
+                print(row, col)
+                print(self.ghost_path)
+                if len(self.ghost_path)!=0 and (row, col) == self.ghost_path[-1]:
+                        pass
+                else:                
+                    for i in self.ghost_path: 
+                        if i == (row, col):
+                            self.state = "FORWARD"
+                            break
+                    else:
+                        self.ghost_path.append((row, col))
+                        
+                    
+        if self.state == "FORWARD":
+        
+            self.distance_travelled += abs(speed) * s["dt"]
+            
+            if left_dist < 0.15:
+                error = left_dist - 0.11
+
+            elif right_dist < 0.15:
+                error = 0.11 - right_dist
+                
+            else:
+                error = 0
+            
+
+            forward = 15
+            self.integral += error * s["dt"]
+            derivative = (error - self.prev_error) / s["dt"]
+
+            
+            turn = self.kp * error + self.ki * self.integral + self.kd * derivative
+            
+            self.prev_error = error
+
+
+            if (self.distance_travelled >= self.cell_length) or (self.move_index==0 and self.distance_travelled>=0.15) or (front_dist<0.06):
+                print(self.ghost_path)
+                self.distance_travelled = 0
+                self.move_index += 1
+                self.prev_error = 0
+                self.integral = 0
+
+                if self.move_index < len(self.moves):
+                    if self.moves[self.move_index] == "LEFT":
+                        print("LEFT")
+                        self.state = "LEFT"
+
+                    elif self.moves[self.move_index] == "RIGHT":
+                        self.state = "RIGHT"
+                        print("RIGHT")
+                    else:
+                        self.state = "FORWARD"
+                        print("FORWARD")
+                        
+            return wheels(forward, turn)
+
+
+
+
+        elif self.state == "LEFT":
+
+            self.angle_turned += yaw_rate * s["dt"]
+            turn = 5
+        
+            if self.angle_turned >= self.turn_angle_target:
+                self.angle_turned = 0
+                self.move_index += 1
+                self.distance_travelled=0
+                self.state = "FORWARD"
+
+            return wheels(0, turn)
+
+
+
+
+        elif self.state == "RIGHT":
+
+            self.angle_turned += (-yaw_rate) * s["dt"]
+            turn = -5
+
+            if self.angle_turned >= self.turn_angle_target:
+                print(self.angle_turned)
+                self.distance_travelled=0
+                self.angle_turned = 0
+                self.move_index += 1
+                self.state = "FORWARD"
+
+            return wheels(0, turn)
+        return (0.0, 0.0)
+        
         # ------------------------------------------------------------------
-
-        return wheels(forward, turn)
 
 
 def main():
