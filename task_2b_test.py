@@ -272,9 +272,9 @@ class Controller:
         self.angle_turned = 0.0
         self.cell_length = 0.22
         self.turn_angle_target = math.pi/2
-        self.kp = 100
+        self.kp = 120
         self.ki = 0.08
-        self.kd = 0.5
+        self.kd = 1
         self.integral=0
         self.prev_error = 0 
         self.route_planned = False
@@ -587,7 +587,7 @@ class Controller:
                 error = 0        
                 
             #PI feedback control, kd is zero
-            forward = 30
+            forward = 27
             
             
         
@@ -597,7 +597,7 @@ class Controller:
             self.prev_error = error
 
 
-            if (self.distance_travelled >= self.cell_length and (front_dist<0.1 or front_dist>0.2)) or (self.move_index==0 and self.distance_travelled>=0.15 and (front_dist<0.1 or  front_dist>0.2)) or (front_dist<=0.09):
+            if (self.distance_travelled >= self.cell_length and (front_dist<0.1 or front_dist>0.2)) or (self.move_index==0 and self.distance_travelled>=0.15 and (front_dist<0.1 or  front_dist>0.2)) or (front_dist<=0.11):
                 self.distance_travelled = 0
                 self.move_index += 1
                 self.prev_error = 0
@@ -620,7 +620,7 @@ class Controller:
         elif self.state == "LEFT":
             self.angle_turned += yaw_rate * s["dt"]
             remaining = self.turn_angle_target - self.angle_turned
-            turn = min(15, max(1, 15*remaining))
+            turn = min(17, max(1, 17*remaining))
           
         
             if self.angle_turned >= self.turn_angle_target:
@@ -639,7 +639,7 @@ class Controller:
             self.angle_turned += (-yaw_rate) * s["dt"]
             remaining = self.turn_angle_target - self.angle_turned
 
-            turn = -min(15, max(1, 15*remaining))
+            turn = -min(17, max(1, 17*remaining))
 
             if self.angle_turned >= self.turn_angle_target:
                 print(self.angle_turned)
