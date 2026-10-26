@@ -272,14 +272,14 @@ class Controller:
         self.angle_turned = 0.0
         self.cell_length = 0.22
         self.turn_angle_target = math.pi/2
-        self.kp = 50
-        self.ki = 0.02
-        self.kd = 0
+        self.kp = 100
+        self.ki = 0.08
+        self.kd = 0.5
         self.integral=0
         self.prev_error = 0 
         self.route_planned = False
         
-    #lakshana start 
+
         
     def ed(self, start, end): #euclidean distance
         return (((end[0]-start[0])*(end[0]-start[0])+(end[1]-start[1])*(end[1]-start[1]))**(1/2))
@@ -340,10 +340,15 @@ class Controller:
             moves = []
             
             # in place u-turns are not possible. hence avoided
+            # ghost path is also avoided
             for move in all_moves:
                 new_dir = move[0]
                 prev_dir = current_cell[5]
-                if prev_dir is not None and (abs(new_dir-prev_dir)%4)==2 and move[0] not in self.ghost_path:
+                print(move)
+                if move[1] in self.ghost_path:
+                    print("True")
+                
+                if ((prev_dir is not None) and ((abs(new_dir-prev_dir)%4)==2)) or ((move[1] in self.ghost_path) and self.ghost_loop_found):
                     continue
                 else:
                     moves.append(move)
@@ -403,11 +408,11 @@ class Controller:
     #S to 1 to 2 to 0 to E
     #S to 2 to 0 to 1 to E
     #S to 2 to 1 to 0 to E
-    # of all these possible paths, we are finding the one with less number of moves as well as turns
+    # of all these possible paths, we are finding the one with less number of moves considering turn cost asw
     
     def build_route(self, order):
 
-        p1 = self.path_plan(self.maze.spawn_cell, self.pellets[order[0]],0)                    # Spawn facing EAST
+        p1 = self.path_plan(self.maze.spawn_cell, self.pellets[order[0]],0)                    
         h1 = p1[-1][1]
         p2 = self.path_plan(self.pellets[order[0]], self.pellets[order[1]],h1)
         h2 = p2[-1][1]
@@ -430,7 +435,7 @@ class Controller:
 
         return cost + 5*turns
         
-        
+    # convert the path to a list of moves such as "FORWARD", "LEFT", "RIGHT"
     def convert_path_to_moves(self, path):
         path[0][1] = 0
         
@@ -458,36 +463,59 @@ class Controller:
         self.pellets = [tuple(c) for c in msg.get("pellets", [])]
         self.have_pellets = True
         print(f"pellets remaining: {self.pellets}")
-
+        
         # TODO (optional): plan here rather than in decide(). You are told the
         # pellets once, at the start, and the maze never changes - so the whole
         # route can be computed now, before the robot has moved.
         
-        # paths[] store all possible path combinations
-        # then the cost of each path present in paths is calculated and the one with minimum cost is opt_path
-        if self.route_planned:
-            return
         
-        self.route_planned = True
-
-        self.paths = []
-
-        self.orders = [(0,1,2), (0, 2, 1), (1, 0, 2), (1,2 , 0), (2, 0, 1), (2, 1, 0)]
-
-        for order in self.orders:
-
-            route = self.build_route(order)
-
-            self.paths.append(route)
+        if self.state=="OBSERVE_GHOST":
+            self.observe_ghost()
             
-        self.opt_path = min(self.paths, key=self.path_cost)
-        
-        print(self.opt_path, '\n')
-        self.moves=self.convert_path_to_moves(self.opt_path)
-        self.moves.append("FORWARD")
-        print(self.moves)
+            
+            
+            
+    def observe_ghost(self):
+        if self.ghost_loop_found or self.ghost is None:
+            return
+        row = self.ghost["row"]
+        col = self.ghost["col"]
+        cell = (row, col)
+        # ignore repeated samples while ghost stays in same cell
+        if len(self.ghost_path) > 0 and cell == self.ghost_path[-1]:
+            return
+        # loop completed
+        if cell in self.ghost_path:
+            self.ghost_loop_found = True
+            print("GHOST PATH: ", self.ghost_path, '\n')
+            self.route_plan()
+            self.state = "FORWARD"
+            return
+        self.ghost_path.append(cell)
 
-    #lakshana end   
+                    
+                    
+    # paths[] store all possible path combinations
+    # then the cost of each path present in paths is calculated and the one with minimum cost is opt_path                
+    def route_plan(self):
+            if self.route_planned:
+                return
+        
+            self.route_planned = True
+            self.paths = []
+            self.orders = [(0,1,2), (0, 2, 1), (1, 0, 2), (1,2 , 0), (2, 0, 1), (2, 1, 0)]
+
+            for order in self.orders:
+                route = self.build_route(order)
+                self.paths.append(route)
+            
+            self.opt_path = min(self.paths, key=self.path_cost)
+        
+            print(self.opt_path, '\n')
+            self.moves=self.convert_path_to_moves(self.opt_path)
+            self.moves.append("FORWARD")
+            print(self.moves)
+        
     
     
     
@@ -497,11 +525,12 @@ class Controller:
         `s` is the decoded pacbot/sensors payload. Return (left, right) in
         rad/s.
         """
+        
         self.elapsed += s["dt"]
 
         left_dist = s["fl"]          # m to the wall on the left
         right_dist = s["fr"]         # m to the wall on the right
-        front_dist = max(s["sl"], s["sr"])   # m to the wall ahead
+        front_dist = min(s["sl"], s["sr"])   # m to the wall ahead
         yaw_rate = s["gyro"][2]      # rad/s about z
         # Ticks are cumulative counts, so speed is a DIFFERENCE, not a
         # reading. 360 counts per wheel revolution.
@@ -539,56 +568,36 @@ class Controller:
         # Unused so far - delete these lines once you use them.
         
         
-        if self.move_index >= len(self.moves):
-            return 0.0, 0.0
-
-        command = self.moves[self.move_index]
-
-
-
         if self.state == "OBSERVE_GHOST":
-            if self.ghost is not None:
-                col = round(self.ghost["x"] / 0.22)
-                row = 14 - round(self.ghost["y"] / 0.22)
-                print(row, col)
-                print(self.ghost_path)
-                if len(self.ghost_path)!=0 and (row, col) == self.ghost_path[-1]:
-                        pass
-                else:                
-                    for i in self.ghost_path: 
-                        if i == (row, col):
-                            self.state = "FORWARD"
-                            break
-                    else:
-                        self.ghost_path.append((row, col))
-                        
+            return (0.0, 0.0)
+            
+
+   
                     
-        if self.state == "FORWARD":
-        
-            self.distance_travelled += abs(speed) * s["dt"]
+        if self.state == "FORWARD":   
+            self.distance_travelled += abs(speed) * s["dt"]           
             
             if left_dist < 0.15:
-                error = left_dist - 0.11
-
+                error = left_dist - 0.11            
+         
             elif right_dist < 0.15:
                 error = 0.11 - right_dist
                 
             else:
-                error = 0
+                error = 0        
+                
+            #PI feedback control, kd is zero
+            forward = 30
             
-
-            forward = 15
+            
+        
             self.integral += error * s["dt"]
             derivative = (error - self.prev_error) / s["dt"]
-
-            
             turn = self.kp * error + self.ki * self.integral + self.kd * derivative
-            
             self.prev_error = error
 
 
-            if (self.distance_travelled >= self.cell_length) or (self.move_index==0 and self.distance_travelled>=0.15) or (front_dist<0.06):
-                print(self.ghost_path)
+            if (self.distance_travelled >= self.cell_length and (front_dist<0.1 or front_dist>0.2)) or (self.move_index==0 and self.distance_travelled>=0.15 and (front_dist<0.1 or  front_dist>0.2)) or (front_dist<=0.09):
                 self.distance_travelled = 0
                 self.move_index += 1
                 self.prev_error = 0
@@ -596,15 +605,12 @@ class Controller:
 
                 if self.move_index < len(self.moves):
                     if self.moves[self.move_index] == "LEFT":
-                        print("LEFT")
                         self.state = "LEFT"
 
                     elif self.moves[self.move_index] == "RIGHT":
                         self.state = "RIGHT"
-                        print("RIGHT")
                     else:
                         self.state = "FORWARD"
-                        print("FORWARD")
                         
             return wheels(forward, turn)
 
@@ -612,11 +618,13 @@ class Controller:
 
 
         elif self.state == "LEFT":
-
             self.angle_turned += yaw_rate * s["dt"]
-            turn = 5
+            remaining = self.turn_angle_target - self.angle_turned
+            turn = min(15, max(1, 15*remaining))
+          
         
             if self.angle_turned >= self.turn_angle_target:
+            
                 self.angle_turned = 0
                 self.move_index += 1
                 self.distance_travelled=0
@@ -628,9 +636,10 @@ class Controller:
 
 
         elif self.state == "RIGHT":
-
             self.angle_turned += (-yaw_rate) * s["dt"]
-            turn = -5
+            remaining = self.turn_angle_target - self.angle_turned
+
+            turn = -min(15, max(1, 15*remaining))
 
             if self.angle_turned >= self.turn_angle_target:
                 print(self.angle_turned)
@@ -662,9 +671,14 @@ def main():
         if msg.topic == TOPIC_PELLETS:
             controller.on_pellets(payload)
             return
+            
         if msg.topic == TOPIC_GHOST:
-            controller.ghost = payload      # {"row":..,"col":..,"x":..,"y":..}
+            controller.ghost = payload      
+            # {"row":..,"col":..,"x":..,"y":..}
+            if controller.state == "OBSERVE_GHOST":
+                controller.observe_ghost()
             return
+            
         if msg.topic == TOPIC_RESULT:
             print(f"run over: solved={payload['solved']}, "
                   f"collisions={payload['collisions']}")
